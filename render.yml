@@ -1,0 +1,6 @@
+services:
+  - type: web
+    name: wfm-app
+    env: python
+    buildCommand: ""
+    startCommand: streamlit run app.py --server.port $PORT
