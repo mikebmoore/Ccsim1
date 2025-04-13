@@ -2,72 +2,136 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
-import time
+from datetime import datetime, time as dtime
 
-# Page config
-st.set_page_config(page_title="Contacts Generator", layout="wide")
+st.set_page_config(page_title="Contact Generator", layout="wide")
+st.title("Contact Generator")
+st.markdown("Simulate 15-minute interval contact volume by channel, with common or custom arrival patterns.")
 
-st.title("Contacts Generator")
-st.markdown("Simulates 15-minute interval contact data across multiple channels. Auto-refreshes every 15 seconds.")
-
-# Sidebar Inputs
+# --- Sidebar Controls ---
 st.sidebar.header("Simulation Settings")
 
-total_contacts_per_hour = st.sidebar.slider("Total Contacts per Hour", 100, 2000, 500, step=50)
+# Operating hours
+start_time = st.sidebar.time_input("Start Time", dtime(8, 0))
+end_time = st.sidebar.time_input("End Time", dtime(17, 0))
 
-# Channel Mix Sliders (ensure they sum to 100%)
+# Contact volume
+total_contacts_per_hour = st.sidebar.slider("Contacts per Hour", 100, 2000, 500, step=50)
+
+# Channel mix
 st.sidebar.subheader("Channel Mix (%)")
+voice_pct = st.sidebar.slider("Voice", 0, 100, 50)
+chat_pct = st.sidebar.slider("Chat", 0, 100, 30)
+email_pct = st.sidebar.slider("Email", 0, 100, 20)
 
-default_mix = {"Voice": 40, "Chat": 30, "Email": 20, "SMS": 10}
+# Normalize if needed
+total_pct = voice_pct + chat_pct + email_pct
+if total_pct != 100:
+    st.sidebar.warning("Channel mix doesn't sum to 100%. Normalizing automatically.")
+    voice_pct = voice_pct / total_pct * 100
+    chat_pct = chat_pct / total_pct * 100
+    email_pct = email_pct / total_pct * 100
 
-voice_percent = st.sidebar.slider("Voice", 0, 100, default_mix["Voice"])
-chat_percent = st.sidebar.slider("Chat", 0, 100, default_mix["Chat"])
-email_percent = st.sidebar.slider("Email", 0, 100, default_mix["Email"])
-sms_percent = st.sidebar.slider("SMS", 0, 100, default_mix["SMS"])
+# --- Time Intervals Setup ---
+start_dt = datetime.combine(datetime.today(), start_time)
+end_dt = datetime.combine(datetime.today(), end_time)
+intervals = pd.date_range(start=start_dt, end=end_dt, freq="15min")[:-1]
+num_intervals = len(intervals)
 
-# Normalize if total != 100%
-total_percent = voice_percent + chat_percent + email_percent + sms_percent
-if total_percent != 100:
-    st.sidebar.warning("Percentages don't add up to 100%. Normalizing automatically.")
-    total = voice_percent + chat_percent + email_percent + sms_percent
-    voice_percent = voice_percent / total * 100
-    chat_percent = chat_percent / total * 100
-    email_percent = email_percent / total * 100
-    sms_percent = sms_percent / total * 100
+# --- Common Arrival Patterns ---
+def generate_pattern(pattern_name):
+    x = np.linspace(0, 1, num_intervals)
+    if pattern_name == "Flat":
+        return np.ones(num_intervals)
+    elif pattern_name == "Morning Peak":
+        return np.exp(-5 * (x - 0.3)**2)
+    elif pattern_name == "Afternoon Peak":
+        return np.exp(-5 * (x - 0.7)**2)
+    elif pattern_name == "Midday Spike":
+        return np.exp(-6 * (x - 0.5)**2)
+    elif pattern_name == "U-Shape":
+        return 1 - np.abs(0.5 - x)
+    elif pattern_name == "Bell Curve":
+        return np.exp(-6 * (x - 0.5)**2)
+    elif pattern_name == "Front-Loaded":
+        return 1 - x
+    elif pattern_name == "Back-Loaded":
+        return x
+    elif pattern_name == "Double Peaks":
+        return np.exp(-8 * (x - 0.3)**2) + np.exp(-8 * (x - 0.7)**2)
+    elif pattern_name == "Random":
+        np.random.seed(42)
+        return np.random.rand(num_intervals)
+    else:
+        return np.ones(num_intervals)
 
-# --- Generate Data ---
-intervals = pd.date_range(start="08:00", end="17:45", freq="15min")
-contacts_per_interval = total_contacts_per_hour / 4
+# --- Arrival Curve Selection ---
+st.sidebar.subheader("Arrival Curve")
+curve_option = st.sidebar.selectbox("Select a pattern", [
+    "Flat", "Morning Peak", "Afternoon Peak", "Midday Spike", "U-Shape",
+    "Bell Curve", "Front-Loaded", "Back-Loaded", "Double Peaks", "Random", "Custom"
+])
 
-# Simulate Poisson-distributed contacts per channel
+if curve_option != "Custom":
+    raw_curve = generate_pattern(curve_option)
+    arrival_curve = raw_curve / raw_curve.sum()
+    show_curve_df = pd.DataFrame({
+        "Interval": intervals.strftime("%H:%M"),
+        "Weight": np.round(arrival_curve, 4)
+    })
+else:
+    # Editable custom curve
+    st.sidebar.info("Edit the weights manually. Values will be normalized.")
+    custom_df = pd.DataFrame({
+        "Interval": intervals.strftime("%H:%M"),
+        "Weight": [1.0] * num_intervals
+    })
+    edited_df = st.data_editor(custom_df, use_container_width=True, key="arrival_editor")
+    raw_curve = edited_df["Weight"].to_numpy()
+    arrival_curve = raw_curve / raw_curve.sum()
+    show_curve_df = edited_df.copy()
+    show_curve_df["Weight"] = np.round(arrival_curve, 4)
+
+# --- Display Arrival Curve Chart ---
+st.subheader("Arrival Curve")
+curve_fig = px.bar(
+    show_curve_df,
+    x="Interval",
+    y="Weight",
+    title=f"Arrival Curve Pattern: {curve_option}",
+    labels={"Weight": "Normalized Weight"},
+)
+st.plotly_chart(curve_fig, use_container_width=True)
+
+# --- Contact Volume Simulation ---
+total_contacts = total_contacts_per_hour * (num_intervals / 4)
+contacts_by_interval = np.random.poisson(total_contacts * arrival_curve)
+
+# Channel splits
+voice = np.random.poisson(contacts_by_interval * (voice_pct / 100))
+chat = np.random.poisson(contacts_by_interval * (chat_pct / 100))
+email = np.random.poisson(contacts_by_interval * (email_pct / 100))
+
 data = pd.DataFrame({
     "Interval": intervals,
-    "Voice": np.random.poisson(contacts_per_interval * (voice_percent / 100), len(intervals)),
-    "Chat": np.random.poisson(contacts_per_interval * (chat_percent / 100), len(intervals)),
-    "Email": np.random.poisson(contacts_per_interval * (email_percent / 100), len(intervals)),
-    "SMS": np.random.poisson(contacts_per_interval * (sms_percent / 100), len(intervals)),
+    "Voice": voice,
+    "Chat": chat,
+    "Email": email
 })
+data["Total"] = data[["Voice", "Chat", "Email"]].sum(axis=1)
 
-data["Total"] = data[["Voice", "Chat", "Email", "SMS"]].sum(axis=1)
-
-# --- Visualization ---
-fig = px.bar(
+# --- Display Contact Volume Chart ---
+st.subheader("Simulated Contact Volume")
+volume_fig = px.bar(
     data,
     x="Interval",
-    y=["Voice", "Chat", "Email", "SMS"],
-    title="Simulated Contacts by Channel (15-Minute Intervals)",
+    y=["Voice", "Chat", "Email"],
+    title="Contact Volume by Channel",
     labels={"value": "Contacts", "Interval": "Time"},
     barmode="stack"
 )
-
-st.plotly_chart(fig, use_container_width=True)
+st.plotly_chart(volume_fig, use_container_width=True)
 
 # --- Optional Raw Data ---
-if st.checkbox("Show Raw Data"):
+with st.expander("Show Raw Data"):
     st.dataframe(data)
-
-# --- Auto-refresh every 15 seconds ---
-st.markdown("Auto-refreshing every **15 seconds**...")
-st_autorefresh = st.experimental_rerun if "streamlit_autorefresh" not in st.session_state else None
-time.sleep(15)
-st.experimental_rerun()
